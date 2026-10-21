@@ -21,10 +21,10 @@
 		<Nullable>enable</Nullable>
 
 		<!-- Display name -->
-		<ApplicationTitle>ExpressApp</ApplicationTitle>
+		<ApplicationTitle>eXpress</ApplicationTitle>
 
 		<!-- App Identifier -->
-		<ApplicationId>com.companyname.ExpressApp</ApplicationId>
+		<ApplicationId>ru.unlimitedtech.express.desktop</ApplicationId>
 
 		<!-- Versions -->
 		<ApplicationDisplayVersion>1.0</ApplicationDisplayVersion>
@@ -40,6 +40,11 @@
 		<TargetPlatformMinVersion Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'windows'">10.0.17763.0</TargetPlatformMinVersion>
 		<SupportedOSPlatformVersion Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'tizen'">6.5</SupportedOSPlatformVersion>
 	</PropertyGroup>
+
+	<ItemGroup>
+		<Using Include="System.Text.Json" />
+		<Using Include="System.Text.Json.Serialization" />
+	</ItemGroup>
 
 	<ItemGroup>
 		<!-- App Icon -->
@@ -62,6 +67,9 @@
 	<ItemGroup>
 		<PackageReference Include="Microsoft.Maui.Controls" Version="$(MauiVersion)" />
 		<PackageReference Include="Microsoft.Extensions.Logging.Debug" Version="9.0.9" />
+		<PackageReference Include="Microsoft.Extensions.Http" Version="9.0.9" />
+		<PackageReference Include="Portable.BouncyCastle" Version="1.9.0" />
+		<PackageReference Include="ZXing.Net" Version="0.16.9" />
 	</ItemGroup>
 
 </Project>

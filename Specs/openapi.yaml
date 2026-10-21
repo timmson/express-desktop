@@ -1,0 +1,607 @@
+openapi: 3.0.3
+
+info:
+  title: eXpress Web — QR-авторизация
+  version: 3.75.58
+  description: |
+    Спецификация методов QR-авторизации веб-клиента `corp.express`
+    (вход «Вход по QR-коду» с подтверждением через мобильное приложение).
+
+    ## Как формируется QR-код (по результатам анализа Chrome DevTools)
+
+    1. Клиент генерирует пару ключей Ed25519 и идентификатор установки
+       (`registration_id` / `udid`).
+    2. Клиент отправляет `POST /api/v1/authentication/qr/mobile_to_web/request`
+       с данными устройства и публичным ключом. Каждый запрос подписывается
+       (заголовки `signature`, `express-request-nonce`, `digest`).
+    3. Сервер выдаёт токен (payload) для одноразового входа.
+    4. **QR-код генерируется на стороне клиента**: payload кодируется в QR
+       (версия 3, сетка 57×57 модулей) и выводится как SVG
+       (`<svg viewBox="0 0 57 57">` с двумя `<path>` — фон и модули).
+       Растровое изображение или canvas сервер не отдаёт.
+    5. Мобильное приложение сканирует код, сервер связывает сессию устройства
+       с сессией браузера, веб-клиент завершает вход.
+
+    > **Внимание:** схема ответа (`QrAuthResponse`) восстановлена по косвенным
+    > признакам — в момент анализа сервер возвращал `408 Request Timeout`,
+    > успешный ответ получить не удалось. Поля необходимо сверить с реальным
+    > ответом до использования спецификации для генерации кода.
+
+servers:
+  - url: https://ru.public.express
+    description: Публичный кластер (RU)
+  - url: https://corp.express
+    description: Хост веб-клиента (статика + проксирование API)
+
+tags:
+  - name: authentication
+    description: Методы входа, в том числе по QR-коду
+  - name: kdc
+    description: Инициализация ключевой инфраструктуры клиента
+
+paths:
+  /api/v1/authentication/token/active:
+    get:
+      tags:
+        - authentication
+      operationId: getTokenActive
+      summary: Проверка активности текущей сессии (валидация токена)
+      description: |
+        Проверка живёт ли ещё сохранённая сессия клиента. Вызывается при
+        старте приложения, **только если** в локальном состоянии
+        (`IndexedDB` → `authState`) есть признаки активной сессии:
+        `active === true` и `tokenExpiresAt` в будущем.
+
+        Если сохранённой сессии нет (`active: false`, `tokenExpiresAt: null`),
+        запрос не отправляется — клиент сразу показывает экран выбора способа
+        входа (`authStatus = chooseAuthType`).
+
+        Успешный ответ (`200`) означает, что сессия валидна: клиент переходит
+        к `authStatus = authorized` и не показывает форму входа.
+        Ошибочные ответы сбрасывают сессию.
+
+        Ответ содержит токены доступа и публичный ключ сервера RTS, а также
+        атрибуты активации устройства.
+
+        > **Внимание:** схема ответа (`TokenActiveResponse`) восстановлена по
+        > именам полей, обнаруженным в бандле `app.js` рядом с этим путём.
+        > Успешный ответ в трафике зафиксировать не удалось — поля требуют
+        > сверки с реальным ответом.
+      security:
+        - BearerAccessToken: []
+          Ed25519Signature: []
+          RequestNonce: []
+          RequestDigest: []
+      parameters:
+        - $ref: '#/components/parameters/Signature'
+        - $ref: '#/components/parameters/RequestNonce'
+        - $ref: '#/components/parameters/Digest'
+      responses:
+        '200':
+          description: |
+            Сессия активна. Возвращаются действующие токены доступа и
+            атрибуты активированного устройства.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenActiveResponse'
+        '400':
+          description: |
+            Некорректный запрос. Возможны коды `request_invalid_signature`,
+            `ALREADY_REGISTERED`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: |
+            Токен недействителен или истёк. Клиент сбрасывает сессию и
+            возвращается к выбору способа входа. Возможны коды
+            `NEED_CTS_LOGIN` (требуется повторный вход через CTS).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: |
+            Доступ запрещён политикой сервера. Коды `TERMINATE_CLIENT`
+            (клиент должен быть перезапущен/разлогинен),
+            `PROHIBITED_PLATFORM` (платформа не поддерживается).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '408':
+          description: Таймаут ожидания ответа сервера.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/v1/authentication/qr/mobile_to_web/request:
+    post:
+      tags:
+        - authentication
+      operationId: createMobileToWebQrRequest
+      summary: Запрос QR-кода для входа с мобильного приложения
+      description: |
+        Регистрирует запрос на вход «с телефона на веб». Тело запроса
+        обязательно должно быть подписано: сервер проверяет `Digest`
+        (SHA-256 от тела), `express-request-nonce` (защита от повтора)
+        и `signature` (Ed25519 по подписанным заголовкам).
+
+        Запрос является долгим (long-polling): клиент держит соединение
+        открытым до сканирования кода или истечения таймаута. Подтверждённые
+        в трафике коды ответа: `200`, `408`.
+
+        Повторный вызов используется клиентом для обновления QR-кода —
+        при перезагрузке страницы запрос отправлялся трижды к `kdc/start`
+        и повторно к `mobile_to_web/request`.
+      security:
+        - Ed25519Signature: []
+          RequestNonce: []
+          RequestDigest: []
+      parameters:
+        - $ref: '#/components/parameters/Signature'
+        - $ref: '#/components/parameters/RequestNonce'
+        - $ref: '#/components/parameters/Digest'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/QrAuthRequest'
+            example:
+              registration_id: dd75f453-2c77-5eb6-bd2a-d3acfe2d5d1e
+              registration_token: >-
+                fBX567vp2yLKy6mBAxr3EF6PGcZ3cX9VQPhsVIRibnUZnpTgvQ5tJJQHPTz6yu0Gh0YslbRaGWZdVZ1bUdVCQQ==
+              sign_pub_key: w4pQd3+GMkwatHqB8wd1fLbDKXSeyjgbqlZVG7VYo1A=
+              udid: 828a7c5a-8e64-53b0-9433-4c6c92df83ab
+              app_version: 3.75.58
+              device: Chrome 155.0
+              device_software: Windows 11
+              device_hostname: null
+              device_meta:
+                pushes: false
+                timezone: Europe/Moscow
+                permissions:
+                  notifications: false
+              locale: ru
+              manufacturer: Google
+              platform: web
+              platform_package_id: ru.unlimitedtech.express
+      responses:
+        '200':
+          description: Запрос создан; далее тело содержит payload для QR-кода
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/QrAuthResponse'
+        '400':
+          description: Некорректное тело запроса или неподдерживаемые параметры
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Не пройдена проверка подписи, nonce или digest
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '408':
+          description: |
+            Таймаут ожидания сканирования кода. Наблюдались повторные
+            попытки клиента после `408`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '429':
+          description: Превышена частота запросов QR-кодов с одного устройства
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/v1/kdc/start:
+    get:
+      tags:
+        - kdc
+      operationId: startKeyDistribution
+      summary: Инициализация сессии ключевой инфраструктуры
+      description: |
+        Предварительный вызов перед запросом QR-кода: клиент получает
+        параметры, необходимые для генерации ключей и подписи запросов.
+        В трафике фиксируется несколько последовательных вызовов.
+      responses:
+        '200':
+          description: Параметры инициализации получены
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/KdcStartResponse'
+        '401':
+          description: Требуется подпись запроса
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+components:
+  parameters:
+    Signature:
+      name: signature
+      in: header
+      required: true
+      description: |
+        Подпись запроса по схеме HTTP Signatures (draft-cavage), ключ Ed25519.
+        Пример значения:
+
+        ```
+        signature:keyId="dd75f453-2c77-5eb6-bd2a-d3acfe2d5d1e",
+        algorithm="ed25519",
+        headers="(request-target) (created) express-request-nonce digest",
+        signature="KriKuNzlznWdxIrZRbYn4U0Nv3zs2F7nJxwKrVp+3Tfdb1N59QO7XRudPiJk1RFsCr5hGpvUuGXHv4V5GUABDw==",
+        created=1792605111
+        ```
+
+        `keyId` совпадает с `registration_id` из тела запроса.
+      schema:
+        type: string
+      example: >-
+        keyId="dd75f453-2c77-5eb6-bd2a-d3acfe2d5d1e",algorithm="ed25519",headers="(request-target) (created) express-request-nonce digest",signature="KriKuNzlznWdxIrZRbYn4U0Nv3zs2F7nJxwKrVp+3Tfdb1N59QO7XRudPiJk1RFsCr5hGpvUuGXHv4V5GUABDw==",created=1792605111
+
+    RequestNonce:
+      name: express-request-nonce
+      in: header
+      required: true
+      description: Одноразовое значение (base64, 32 байта) для защиты от повтора.
+      schema:
+        type: string
+        format: byte
+      example: RGXiGXrmM+dYgFxziWfFFv1aqDKIE76tnGand4szoQs=
+
+    Digest:
+      name: digest
+      in: header
+      required: true
+      description: Хеш тела запроса, используется подписанный алгоритм SHA-256.
+      schema:
+        type: string
+      example: SHA-256=ggSyoiBdpXQycetNxoq6u0ST5NmnmaTgkoayPcoyW7M=
+
+  securitySchemes:
+    BearerAccessToken:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        Access-токен текущей сессии (`access_token` / `rts_access_token` /
+        `cts_access_token`), полученный на этапе входа и хранимый в
+        IndexedDB `authState`.
+    Ed25519Signature:
+      type: apiKey
+      in: header
+      name: signature
+      description: |
+        Подпись в формате HTTP Signatures с алгоритмом `ed25519`.
+        Приватный ключ хранится только на стороне клиента (веб-вкладка).
+    RequestNonce:
+      type: apiKey
+      in: header
+      name: express-request-nonce
+      description: Одноразовый nonce запроса.
+    RequestDigest:
+      type: apiKey
+      in: header
+      name: digest
+      description: SHA-256 digest тела запроса.
+
+  schemas:
+    RegisterRequest:
+      type: object
+      description: |
+        Данные для первичной регистрации клиента. Содержит идентификатор
+        устройства, публичный ключ Ed25519 и метаданные окружения.
+      required:
+        - udid
+        - sign_pub_key
+        - app_version
+        - device
+        - platform
+        - platform_package_id
+      properties:
+        udid:
+          type: string
+          format: uuid
+          description: |
+            Стабильный идентификатор устройства/браузерного профиля.
+            Генерируется как UUID v4 через `crypto.randomUUID()`.
+            Сохраняется в IndexedDB `authState` → `items[].udid`.
+          example: 828a7c5a-8e64-53b0-9433-4c6c92df83ab
+        sign_pub_key:
+          type: string
+          format: byte
+          description: |
+            Публичный ключ Ed25519 (base64, 32 байта) для проверки подписи.
+            Генерируется через `crypto.subtle.generateKey({name: 'Ed25519'})`.
+          example: w4pQd3+GMkwatHqB8wd1fLbDKXSeyjgbqlZVG7VYo1A=
+        app_version:
+          type: string
+          description: Версия веб-клиента.
+          example: 3.75.58
+        device:
+          type: string
+          description: Строка браузера (name + major version).
+          example: Chrome 155.0
+        device_software:
+          type: string
+          description: Операционная система.
+          example: Windows 11
+        device_hostname:
+          type: string
+          nullable: true
+          description: Имя хоста; для веб-клиента обычно `null`.
+          example: null
+        device_meta:
+          $ref: '#/components/schemas/DeviceMeta'
+        locale:
+          type: string
+          description: Локаль интерфейса (BCP-47).
+          example: ru
+        manufacturer:
+          type: string
+          description: Производитель окружения; для веб-клиента — вендор браузера.
+          example: Google
+        platform:
+          type: string
+          description: Тип платформы клиента.
+          enum:
+            - web
+          example: web
+        platform_package_id:
+          type: string
+          description: Идентификатор пакета продукта.
+          example: ru.unlimitedtech.express
+
+    RegisterResponse:
+      type: object
+      description: |
+        Ответ сервера при регистрации клиента.
+
+        **Требует верификации** — успешный ответ не был получен в момент анализа.
+      properties:
+        registration_id:
+          type: string
+          format: uuid
+          description: |
+            UUID регистрации клиента. Используется как `keyId` для подписи
+            запросов и как `registration_id` в теле запроса QR-кода.
+            Сохраняется в IndexedDB `authState` → `items[].rtsRegistrationId`.
+          example: 771af0e3-993b-5790-b5a4-24133239be66
+        registration_token:
+          type: string
+          format: byte
+          description: |
+            Токен регистрации (base64, 64 байта). Используется как
+            `registration_token` в теле запроса QR-кода.
+            Сохраняется в IndexedDB `authState` → `items[].qrRegistrationToken`.
+          example: JqrhMIe4drbGcWuGh6OhhJeKgNqiPNW7aw38eY/43ZfSPlPCZu1D0g6llf5vREtl/bP7i3ohsctazb9NzKKJA==
+        server_time:
+          type: integer
+          format: int64
+          description: Unix-time сервера, используется для поля `created` подписи.
+          example: 1792605050
+
+    QrAuthRequest:
+      type: object
+      description: Данные устройства веб-клиента, запрашивающего QR-код входа.
+      required:
+        - registration_id
+        - registration_token
+        - sign_pub_key
+        - udid
+        - app_version
+        - device
+        - platform
+        - platform_package_id
+      properties:
+        registration_id:
+          type: string
+          format: uuid
+          description: UUID установки/регистрации; он же `keyId` подписи.
+          example: dd75f453-2c77-5eb6-bd2a-d3acfe2d5d1e
+        registration_token:
+          type: string
+          format: byte
+          description: Токен регистрации (base64, 64 байта), выданный на этапе инициализации.
+          example: fBX567vp2yLKy6mBAxr3EF6PGcZ3cX9VQPhsVIRibnUZnpTgvQ5tJJQHPTz6yu0Gh0YslbRaGWZdVZ1bUdVCQQ==
+        sign_pub_key:
+          type: string
+          format: byte
+          description: Публичный ключ Ed25519 (base64, 32 байта) для проверки подписи.
+          example: w4pQd3+GMkwatHqB8wd1fLbDKXSeyjgbqlZVG7VYo1A=
+        udid:
+          type: string
+          format: uuid
+          description: Стабильный идентификатор устройства/браузерного профиля.
+          example: 828a7c5a-8e64-53b0-9433-4c6c92df83ab
+        app_version:
+          type: string
+          description: Версия веб-клиента.
+          example: 3.75.58
+        device:
+          type: string
+          description: Строка браузера (name + major version).
+          example: Chrome 155.0
+        device_software:
+          type: string
+          description: Операционная система.
+          example: Windows 11
+        device_hostname:
+          type: string
+          nullable: true
+          description: Имя хоста; для веб-клиента обычно `null`.
+          example: null
+        device_meta:
+          $ref: '#/components/schemas/DeviceMeta'
+        locale:
+          type: string
+          description: Локаль интерфейса (BCP-47).
+          example: ru
+        manufacturer:
+          type: string
+          description: Производитель окружения; для веб-клиента — вендор браузера.
+          example: Google
+        platform:
+          type: string
+          description: Тип платформы клиента.
+          enum:
+            - web
+          example: web
+        platform_package_id:
+          type: string
+          description: Идентификатор пакета продукта.
+          example: ru.unlimitedtech.express
+
+    DeviceMeta:
+      type: object
+      description: Метаданные окружения клиента.
+      properties:
+        pushes:
+          type: boolean
+          description: Доступен ли клиенту push-канал (для web — Web Push).
+          example: false
+        timezone:
+          type: string
+          description: IANA-идентификатор часового пояса.
+          example: Europe/Moscow
+        permissions:
+          type: object
+          properties:
+            notifications:
+              type: boolean
+              description: Выдано ли разрешение на уведомления.
+              example: false
+
+    QrAuthResponse:
+      type: object
+      description: |
+        Ответ сервера с данными для построения QR-кода.
+
+        **Требует верификации** — успешный ответ не был получен в момент анализа
+        (завершался с `408`). Названия полей предполагаемые.
+      properties:
+        qr_request_id:
+          type: string
+          format: uuid
+          description: Идентификатор созданного QR-запроса.
+        payload:
+          type: string
+          description: |
+            Строка, которая кодируется в QR-код на стороне клиента
+            (используется мобильным приложением при сканировании).
+        expires_at:
+          type: string
+          format: date-time
+          description: Срок действия QR-кода.
+        status:
+          type: string
+          description: Текущее состояние запроса.
+          enum:
+            - pending
+            - scanned
+            - confirmed
+            - expired
+
+    TokenActiveResponse:
+      type: object
+      description: |
+        Ответ проверки активности токена. Набор полей восстановлен по
+        идентификаторам, обнаруженным в бандле `app.js` рядом со строкой
+        `/api/v1/authentication/token/active`.
+
+        **Требует верификации** — успешный ответ в трафике не зафиксирован.
+      properties:
+        access_token:
+          type: string
+          description: Основной access-токен текущей сессии.
+        rts_access_token:
+          type: string
+          description: Токен доступа к RTS (real-time серверу).
+        cts_access_token:
+          type: string
+          description: Токен доступа к CTS (корпоративному серверу).
+        rts_server_pub_key:
+          type: string
+          format: byte
+          description: |
+            Публичный ключ сервера RTS (base64), используется для проверки
+            подписей сервера и шифрования.
+        activated_at:
+          type: string
+          format: date-time
+          description: Время активации данной регистрации/устройства.
+        last_active_at:
+          type: string
+          format: date-time
+          description: Время последней активности сессии на сервере.
+        app_version:
+          type: string
+          description: Версия клиента, зафиксированная при активации.
+          example: 3.75.58
+        device:
+          type: string
+          description: Строка устройства/браузера из моментa активации.
+          example: Chrome 155.0
+        device_software:
+          type: string
+          description: ОС устройства из момента активации.
+          example: Windows 11
+        cts_host:
+          type: string
+          description: Хост корпоративного сервера (CTS), к которому привязана сессия.
+          nullable: true
+        pushes:
+          type: boolean
+          description: Включены ли для сессии push-уведомления.
+          example: false
+        blocked_reason:
+          type: string
+          nullable: true
+          description: |
+            Причина блокировки устройства/сессии. `null`, если блокировки нет.
+            При непустом значении клиент завершает сессию.
+
+    KdcStartResponse:
+      type: object
+      description: |
+        Параметры инициализации ключевой инфраструктуры.
+
+        **Требует верификации** — содержимое ответа не анализировалось.
+      properties:
+        server_time:
+          type: integer
+          format: int64
+          description: Unix-time сервера, используется для поля `created` подписи.
+        key_id:
+          type: string
+          format: uuid
+          description: Идентификатор ключа для подписи запросов.
+
+    ErrorResponse:
+      type: object
+      description: Ответ с ошибкой.
+      properties:
+        error:
+          type: string
+          description: Машинночитаемый код ошибки.
+          example: TIMEOUT
+        error_code:
+          type: string
+          description: Альтернативное поле кода ошибки.
+        details:
+          type: object
+          nullable: true
+          description: Дополнительные детали ошибки.

@@ -1,4 +1,4 @@
-﻿namespace ExpressApp;
+namespace ExpressApp;
 
 public partial class App : Application
 {
@@ -9,6 +9,7 @@ public partial class App : Application
 
 	protected override Window CreateWindow(IActivationState? activationState)
 	{
-		return new Window(new AppShell());
+		// AppShell resolving через DI, чтобы MainPage получил сервисы авторизации
+		return new Window(MauiProgram.Services.GetRequiredService<AppShell>());
 	}
 }
