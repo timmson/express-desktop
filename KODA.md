@@ -46,7 +46,7 @@
 
 ```
 express-desktop/
-├── MauiNativeApp.csproj          # Файл проекта, SDK-стиль
+├── ExpressApp.csproj          # Файл проекта, SDK-стиль
 ├── MauiProgram.cs                # Точка инициализации MAUI-приложения
 ├── App.xaml / App.xaml.cs        # Приложение, подключение стилей
 ├── AppShell.xaml / .cs           # Shell-навигация (одна страница)

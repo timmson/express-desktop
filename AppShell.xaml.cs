@@ -1,4 +1,4 @@
-﻿namespace MauiNativeApp;
+﻿namespace ExpressApp;
 
 public partial class AppShell : Shell
 {
