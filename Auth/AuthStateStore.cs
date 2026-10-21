@@ -1,3 +1,4 @@
+using System.Security.Cryptography;
 using ExpressApp.Auth.Models;
 
 namespace ExpressApp.Auth;
@@ -44,14 +45,36 @@ public sealed class PreferencesAuthStateStore : IAuthStateStore
     private const string AccessTokenKey = "auth.access_token";
     private const string ExpiresAtKey = "auth.token_expires_at";
 
-    public AuthState Load() => new(
-        Udid: Preferences.Get(UdidKey, string.Empty),
-        PublicKeyBase64: Preferences.Get(PublicKeyKey, string.Empty),
-        PrivateKeySeedBase64: Preferences.Get(PrivateKeyKey, (string?)null),
-        RegistrationId: Preferences.Get(RegistrationIdKey, (string?)null),
-        RegistrationToken: Preferences.Get(RegistrationTokenKey, (string?)null),
-        AccessToken: Preferences.Get(AccessTokenKey, (string?)null),
-        TokenExpiresAt: TryReadExpires());
+    public AuthState Load()
+    {
+        var udid = Preferences.Get(UdidKey, string.Empty);
+        var pubKey = Preferences.Get(PublicKeyKey, string.Empty);
+        var privKey = Preferences.Get(PrivateKeyKey, (string?)null);
+        var regId = Preferences.Get(RegistrationIdKey, string.Empty);
+        var regToken = Preferences.Get(RegistrationTokenKey, string.Empty);
+
+        // Генерируем registration_id и registration_token при первом запуске
+        if (string.IsNullOrEmpty(regId))
+        {
+            regId = Guid.NewGuid().ToString();
+            Preferences.Set(RegistrationIdKey, regId);
+        }
+
+        if (string.IsNullOrEmpty(regToken))
+        {
+            regToken = Convert.ToBase64String(RandomNumberGenerator.GetBytes(64));
+            Preferences.Set(RegistrationTokenKey, regToken);
+        }
+
+        return new AuthState(
+            Udid: udid,
+            PublicKeyBase64: pubKey,
+            PrivateKeySeedBase64: privKey,
+            RegistrationId: regId,
+            RegistrationToken: regToken,
+            AccessToken: Preferences.Get(AccessTokenKey, (string?)null),
+            TokenExpiresAt: TryReadExpires());
+    }
 
     public void Save(AuthState state)
     {

@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="utf-8" ?>
 <ContentPage xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
              xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
+             xmlns:qr="clr-namespace:ExpressApp.Auth.Qr"
              x:Class="ExpressApp.MainPage"
              BackgroundColor="{AppThemeBinding Light={StaticResource White}, Dark={StaticResource OffBlack}}">
 
@@ -8,6 +9,7 @@
         <VerticalStackLayout
             Spacing="20"
             Padding="30"
+            MaximumWidthRequest="520"
             VerticalOptions="Center">
 
             <Label
@@ -16,13 +18,48 @@
                 HorizontalOptions="Center" />
 
             <Label
+                Text="Вход по QR-коду"
+                Style="{StaticResource SubHeadline}"
+                TextColor="{StaticResource Gray600}"
+                HorizontalOptions="Center" />
+
+            <Label
                 x:Name="StatusLabel"
                 Text="Инициализация модуля авторизации..."
                 TextColor="{StaticResource Primary}"
                 HorizontalOptions="Center"
+                HorizontalTextAlignment="Center"
                 FontSize="Medium" />
 
-            <!-- Блок данных QR-кода -->
+            <!-- QR-код: рисуется нативно, quiet zone 4 модуля -->
+            <Border
+                x:Name="QrBorder"
+                IsVisible="False"
+                StrokeShape="RoundRectangle 12"
+                StrokeThickness="1"
+                Stroke="{StaticResource Gray200}"
+                Background="White"
+                Padding="12"
+                HorizontalOptions="Center">
+
+                <GraphicsView
+                    x:Name="QrView"
+                    WidthRequest="280"
+                    HeightRequest="280"
+                    HorizontalOptions="Center"
+                    VerticalOptions="Center" />
+            </Border>
+
+            <Label
+                x:Name="QrHintLabel"
+                Text="Отсканируйте код в мобильном приложении eXpress"
+                TextColor="{StaticResource Gray600}"
+                FontSize="Small"
+                HorizontalOptions="Center"
+                HorizontalTextAlignment="Center"
+                IsVisible="False" />
+
+            <!-- Технические детали для отладки -->
             <Border
                 x:Name="QrDataBorder"
                 StrokeShape="RoundRectangle 8"
@@ -33,39 +70,19 @@
                 Padding="16">
 
                 <VerticalStackLayout Spacing="8">
-                    <Label Text="Данные QR-кода:" FontAttributes="Bold" TextColor="{StaticResource Gray950}" />
-                    <Label x:Name="QrPayloadLabel" Text="" TextColor="{StaticResource Gray950}" FontSize="Small" LineBreakMode="WordWrap" />
-                    <Label x:Name="QrRequestIdLabel" Text="" TextColor="{StaticResource Gray600}" FontSize="Small" />
+                    <Label Text="Payload QR-кода:" FontAttributes="Bold" TextColor="{StaticResource Gray950}" />
+                    <Label x:Name="QrPayloadLabel" Text="" TextColor="{StaticResource Gray950}"
+                           FontSize="Micro" LineBreakMode="WordWrap" />
                     <Label x:Name="QrExpiresLabel" Text="" TextColor="{StaticResource Gray600}" FontSize="Small" />
                 </VerticalStackLayout>
             </Border>
 
-            <!-- ASCII-превью QR для отладки -->
-            <Border
-                x:Name="QrPreviewBorder"
-                StrokeShape="RoundRectangle 8"
-                StrokeThickness="1"
-                Stroke="{StaticResource Tertiary}"
-                Background="{StaticResource Gray950}"
-                IsVisible="False"
-                Padding="8">
-
-                <Label
-                    x:Name="QrPreviewLabel"
-                    Text=""
-                    TextColor="Green"
-                    FontFamily="OpenSansRegular"
-                    FontSize="Micro"
-                    HorizontalOptions="Center"
-                    VerticalOptions="Center" />
-            </Border>
-
             <Button
                 x:Name="StartQrButton"
-                Text="Запросить QR-код"
+                Text="Показать QR-код"
                 Clicked="OnStartQrClicked"
                 HorizontalOptions="Center"
-                Margin="0,20,0,0" />
+                Margin="0,10,0,0" />
 
             <Button
                 x:Name="ResetButton"

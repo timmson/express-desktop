@@ -1,4 +1,3 @@
-using ExpressApp.Auth;
 using ExpressApp.Auth.Qr;
 using ExpressApp.Auth.Services;
 using Microsoft.Extensions.Logging;
@@ -9,7 +8,8 @@ public partial class MainPage : ContentPage
 {
     private readonly QrAuthService _authService;
     private readonly ILogger<MainPage> _logger;
-    private CancellationTokenSource? _pollCts;
+    private readonly QrDrawable _qrDrawable = new();
+    private CancellationTokenSource? _authCts;
 
     public MainPage(QrAuthService authService, ILogger<MainPage> logger)
     {
@@ -18,106 +18,113 @@ public partial class MainPage : ContentPage
         _authService = authService;
         _logger = logger;
 
-        // Запуск проверки сессии при старте страницы
+        QrView.Drawable = _qrDrawable;
+        _authService.StateChanged += OnAuthServiceStateChanged;
+
         _ = CheckSessionOnLoadAsync();
+    }
+
+    protected override void OnDisappearing()
+    {
+        base.OnDisappearing();
+        _authService.StateChanged -= OnAuthServiceStateChanged;
     }
 
     private async Task CheckSessionOnLoadAsync()
     {
         try
         {
-            StatusLabel.Text = "Проверка сессии...";
             await _authService.CheckSessionAsync();
-            UpdateUi();
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Ошибка при проверке сессии");
-            StatusLabel.Text = "Ошибка инициализации";
-            StatusLabel.TextColor = Colors.Red;
+            await MainThread.InvokeOnMainThreadAsync(() =>
+            {
+                StatusLabel.Text = "Ошибка инициализации";
+                StatusLabel.TextColor = Colors.Red;
+            });
         }
     }
 
+    private void OnAuthServiceStateChanged(object? sender, EventArgs e)
+        => MainThread.BeginInvokeOnMainThread(UpdateUi);
+
     private async void OnStartQrClicked(object sender, EventArgs e)
     {
-        // Отменяем предыдущий процесс
-        _pollCts?.Cancel();
-        _pollCts = null;
+        _authCts?.Cancel();
+        _authCts = new CancellationTokenSource();
 
         StartQrButton.IsEnabled = false;
-        ResetButton.IsEnabled = false;
-        StatusLabel.Text = "Запрос QR-кода...";
-        StatusLabel.TextColor = Colors.Blue;
 
         try
         {
-            await _authService.StartQrAuthAsync();
-            UpdateUi();
-
-            // Если статус WaitingForScan — показываем ASCII-превью QR
-            if (_authService.Status == AuthStatus.WaitingForScan && _authService.QrData is { } qrData)
-            {
-                ShowQrPreview(qrData.Payload);
-            }
+            await _authService.StartQrAuthAsync(_authCts.Token);
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Ошибка при запросе QR-кода");
-            StatusLabel.Text = "Ошибка запроса QR";
-            StatusLabel.TextColor = Colors.Red;
         }
         finally
         {
             StartQrButton.IsEnabled = true;
-            ResetButton.IsEnabled = true;
         }
     }
 
     private void OnResetClicked(object sender, EventArgs e)
     {
+        _authCts?.Cancel();
+        _authCts = null;
+
         _authService.Reset();
+        _qrDrawable.Set(null);
+        QrView.Invalidate();
         UpdateUi();
-        StatusLabel.Text = "Авторизация сброшена";
-        StatusLabel.TextColor = Colors.Gray;
     }
 
     private void UpdateUi()
     {
-        QrDataBorder.IsVisible = false;
-        QrPreviewBorder.IsVisible = false;
+        var qrData = _authService.QrData;
+        var status = _authService.Status;
 
-        // Обновляем статус
-        StatusLabel.Text = _authService.Status switch
+        StatusLabel.Text = status switch
         {
-            AuthStatus.Unknown => "Неизвестно. Нажмите «Запросить QR-код».",
+            AuthStatus.Unknown => "Не авторизованы. Нажмите «Показать QR-код».",
             AuthStatus.Initializing => "Инициализация...",
-            AuthStatus.Registering => "Регистрация клиента...",
-            AuthStatus.RequestingQr => "Запрос QR-кода...",
+            AuthStatus.RequestingQr => "Ожидание подтверждения сервером...",
             AuthStatus.WaitingForScan => "Ожидание сканирования QR-кода...",
             AuthStatus.Authorized => "Авторизован",
             AuthStatus.Error => "Ошибка авторизации",
-            AuthStatus.LoggedOut => "Вы вышли из системы",
+            AuthStatus.LoggedOut => "Сессия не активна",
             _ => "Неизвестный статус"
         };
 
-        StatusLabel.TextColor = _authService.Status switch
+        StatusLabel.TextColor = status switch
         {
-            AuthStatus.WaitingForScan => Colors.Green,
-            AuthStatus.Authorized => Colors.Green,
+            AuthStatus.WaitingForScan or AuthStatus.Authorized => Colors.Green,
             AuthStatus.Error => Colors.Red,
             _ => Colors.Blue
         };
 
-        // Показываем данные QR, если есть
-        if (_authService.QrData is { } qrData)
+        var showQr = qrData is not null && status is AuthStatus.WaitingForScan or AuthStatus.RequestingQr;
+
+        QrBorder.IsVisible = showQr;
+        QrHintLabel.IsVisible = showQr;
+
+        if (showQr && qrData is not null)
         {
-            QrDataBorder.IsVisible = true;
-            QrPayloadLabel.Text = $"Payload: {qrData.Payload}";
-            QrRequestIdLabel.Text = $"Request ID: {qrData.RequestId}";
-            QrExpiresLabel.Text = $"Expires: {qrData.ExpiresAt?.ToString("yyyy-MM-dd HH:mm:ss") ?? "не установлен"}";
+            DrawQr(qrData.Payload);
         }
 
-        // Показываем ошибку, если есть
+        QrDataBorder.IsVisible = qrData is not null;
+        if (qrData is not null)
+        {
+            QrPayloadLabel.Text = qrData.Payload;
+            QrExpiresLabel.Text = qrData.ExpiresAt is { } expires
+                ? $"Действителен до: {expires:yyyy-MM-dd HH:mm:ss} · статус: {qrData.Status ?? "—"}"
+                : "Срок действия: уточняется сервером";
+        }
+
         if (_authService.Error is { } error)
         {
             StatusLabel.Text = $"Ошибка: {error.Message}";
@@ -125,11 +132,19 @@ public partial class MainPage : ContentPage
         }
     }
 
-    private void ShowQrPreview(string payload)
+    private void DrawQr(string payload)
     {
-        var preview = QrCodeRenderer.ToConsolePreview(payload);
-        QrPreviewLabel.Text = preview;
-        QrPreviewBorder.IsVisible = true;
-        _logger.LogInformation("ASCII-превью QR-кода ({Lines} строк):", preview.Split('\n').Length);
+        try
+        {
+            _qrDrawable.Set(QrRenderer.Render(payload));
+            QrView.Invalidate();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Не удалось отрисовать QR-код");
+            QrBorder.IsVisible = false;
+        }
     }
+
+    private static IQrCodeRenderer QrRenderer { get; } = new QrCodeRenderer();
 }

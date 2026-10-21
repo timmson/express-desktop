@@ -1,4 +1,3 @@
-using System.Text;
 using ExpressApp.Auth.Models;
 using ExpressApp.Auth.Qr;
 using Microsoft.Extensions.Logging;
@@ -7,7 +6,7 @@ namespace ExpressApp.Auth.Services;
 
 /// <summary>
 /// Главный сервис QR-авторизации. Управляет жизненным циклом:
-/// регистрация → запрос QR → ожидание подтверждения.
+/// генерация payload → показ QR → ожидание подтверждения (long-polling).
 /// </summary>
 public interface IAuthService
 {
@@ -20,15 +19,21 @@ public interface IAuthService
     /// <summary>Ошибка (если возникла).</summary>
     Exception? Error { get; }
 
+    /// <summary>Изменение статуса/QR/ошибки — подписка для UI.</summary>
+    event EventHandler? StateChanged;
+
     /// <summary>
-    /// Запуск процесса QR-авторизации: регистрация + запрос кода.
+    /// Запуск процесса QR-авторизации: локальный payload + показ кода + ожидание.
     /// </summary>
-    Task StartQrAuthAsync();
+    Task StartQrAuthAsync(CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Проверка сохранённой сессии. Если токен жив — пропускаем экран QR.
     /// </summary>
     Task CheckSessionAsync();
+
+    /// <summary>Отменить ожидание сканирования и очистить QR.</summary>
+    void CancelQrAuth();
 
     /// <summary>Сбросить все данные авторизации.</summary>
     void Reset();
@@ -39,7 +44,6 @@ public enum AuthStatus
 {
     Unknown,
     Initializing,
-    Registering,
     RequestingQr,
     WaitingForScan,
     Authorized,
@@ -50,7 +54,7 @@ public enum AuthStatus
 /// <summary>Данные, подлежащие кодированию в QR.</summary>
 public record QrData(
     string Payload,
-    string RequestId,
+    string Svg,
     DateTime? ExpiresAt,
     string? Status);
 
@@ -60,127 +64,216 @@ public sealed class QrAuthService : IAuthService
     private readonly IAuthApiService _api;
     private readonly IDeviceInformation _deviceInfo;
     private readonly IQrCodeRenderer _qrRenderer;
+    private readonly IAuthStateStore _store;
     private readonly ILogger<QrAuthService> _logger;
+
     private AuthStatus _status = AuthStatus.Unknown;
     private QrData? _qrData;
     private Exception? _error;
+    private CancellationTokenSource? _waitCts;
 
     public AuthStatus Status => _status;
     public QrData? QrData => _qrData;
     public Exception? Error => _error;
+
+    public event EventHandler? StateChanged;
 
     public QrAuthService(
         IClientCrypto crypto,
         IAuthApiService api,
         IDeviceInformation deviceInfo,
         IQrCodeRenderer qrRenderer,
+        IAuthStateStore store,
         ILogger<QrAuthService> logger)
     {
         _crypto = crypto;
         _api = api;
         _deviceInfo = deviceInfo;
         _qrRenderer = qrRenderer;
+        _store = store;
         _logger = logger;
     }
 
-    public async Task StartQrAuthAsync()
+    /// <summary>
+    /// Пункт 4 спецификации: QR формируется на клиенте из локальных значений,
+    /// сервер его не возвращает.
+    /// </summary>
+    private string BuildQrPayload()
+    {
+        var payload = new QrPayload
+        {
+            RegistrationId = _crypto.RegistrationId,
+            RegistrationToken = _crypto.RegistrationToken,
+            RegistrationKey = _crypto.PrivateKeySeedBase64,
+            Version = QrPayload.CurrentVersion
+        };
+
+        return JsonSerializer.Serialize(payload, JsonOptions.Default);
+    }
+
+    public Task StartQrAuthAsync(CancellationToken cancellationToken = default)
+    {
+        CancelQrAuth();
+        _waitCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var token = _waitCts.Token;
+
+        try
+        {
+            _error = null;
+
+            var payload = BuildQrPayload();
+            var svg = _qrRenderer.Render(payload);
+
+            _logger.LogInformation(
+                "QR payload сформирован локально: {Modules}×{Modules} модулей (QR v{QrVersion}, payload v{PayloadVersion})",
+                svg.Modules, svg.Modules, svg.Version, QrPayload.CurrentVersion);
+
+            _qrData = new QrData(payload, svg.Markup, ExpiresAt: null, Status: null);
+            SetStatus(AuthStatus.WaitingForScan);
+
+            // Пункт 5: long-polling — соединение держится до сканирования кода.
+            // Ответ сервера нужен только как подтверждение, содержимое QR не меняет.
+            _ = Task.Run(() => WaitForConfirmationAsync(token), CancellationToken.None);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Ошибка при подготовке QR-кода");
+            _error = ex;
+            SetStatus(AuthStatus.Error);
+        }
+
+        return Task.CompletedTask;
+    }
+
+    private async Task WaitForConfirmationAsync(CancellationToken token)
     {
         try
         {
-            _status = AuthStatus.Registering;
-            _logger.LogInformation("Регистрация клиента");
+            SetStatus(AuthStatus.RequestingQr);
 
-            var registerRequest = CreateRegisterRequest();
-            var bodyBytes = JsonSerializer.SerializeToUtf8Bytes(registerRequest, JsonOptions.Default);
+            var request = CreateQrAuthRequest();
+            var bodyBytes = JsonSerializer.SerializeToUtf8Bytes(request, JsonOptions.Default);
+
             var digest = _crypto.ComputeDigest(bodyBytes);
             var created = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
             var nonce = _crypto.NewNonce();
+
+            // keyId подписи совпадает с registration_id из тела запроса.
             var signature = _crypto.BuildSignatureHeader(
-                _crypto.Udid,
-                "post /api/v1/authentication/register",
+                _crypto.RegistrationId,
+                "post " + AuthApiService.QrRequestPath,
                 created,
                 nonce,
                 digest);
 
-            var registrationId = Guid.NewGuid().ToString();    
-            var registrationToken = Guid.NewGuid().ToString();
-            var qrRequest = CreateQrAuthRequest(registrationId, registrationToken);
-            var qrBodyBytes = JsonSerializer.SerializeToUtf8Bytes(qrRequest, JsonOptions.Default);
-            var qrDigest = _crypto.ComputeDigest(qrBodyBytes);
-
-            created = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
-            nonce = _crypto.NewNonce();
-            signature = _crypto.BuildSignatureHeader(
-                _crypto.Udid,
-                "post /api/v1/authentication/qr/mobile_to_web/request",
-                created,
-                nonce,
-                qrDigest);
-
-            var qrResponse = await _api.RequestQrAsync(
+            var response = await _api.RequestQrAsync(
                 AuthApiService.QrRequestPath,
-                qrBodyBytes,
-                new SignedRequestHeaders(signature, nonce, qrDigest));
+                bodyBytes,
+                new SignedRequestHeaders(signature, nonce, digest));
+
+            token.ThrowIfCancellationRequested();
 
             _logger.LogInformation(
-                "QR-код запрошен: requestId={RequestId} status={Status}",
-                qrResponse.QrRequestId,
-                qrResponse.Status);
+                "Сервер подтвердил QR-запрос: requestId={RequestId} status={Status}",
+                response.QrRequestId,
+                response.Status);
 
-            _qrData = new QrData(
-                qrResponse.Payload,
-                qrResponse.QrRequestId,
-                qrResponse.ExpiresAt,
-                qrResponse.Status);
+            if (_qrData is { } current)
+            {
+                _qrData = current with
+                {
+                    ExpiresAt = response.ExpiresAt,
+                    Status = response.Status
+                };
+            }
 
-            _status = AuthStatus.WaitingForScan;
-            _logger.LogInformation(
-                "Ожидание сканирования QR-кода. Payload: {Payload}",
-                qrResponse.Payload);
+            SetStatus(AuthStatus.Authorized);
+        }
+        catch (OperationCanceledException)
+        {
+            _logger.LogInformation("Ожидание сканирования отменено");
+            _qrData = null;
+            SetStatus(AuthStatus.LoggedOut);
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Ошибка при запросе QR-кода");
+            _logger.LogError(ex, "Ошибка при ожидании подтверждения QR-кода");
             _error = ex;
-            _status = AuthStatus.Error;
+            SetStatus(AuthStatus.Error);
         }
     }
 
-    public Task CheckSessionAsync()
+    public async Task CheckSessionAsync()
     {
         _logger.LogInformation("Проверка текущей сессии");
-        // TODO: если есть сохранённый токен, проверяем через /token/active
-        _status = AuthStatus.LoggedOut;
-        return Task.CompletedTask;
+
+        var state = _store.Load();
+        if (!state.HasLiveSession)
+        {
+            _logger.LogInformation("Сохранённой активной сессии нет — показываем экран QR- входа");
+            SetStatus(AuthStatus.LoggedOut);
+            return;
+        }
+
+        try
+        {
+            var created = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+            var nonce = _crypto.NewNonce();
+            var digest = _crypto.ComputeDigest(ReadOnlySpan<byte>.Empty);
+            var signature = _crypto.BuildSignatureHeader(
+                _crypto.RegistrationId,
+                "get " + AuthApiService.TokenActivePath,
+                created,
+                nonce,
+                digest);
+
+            var active = await _api.CheckTokenActiveAsync(
+                state.AccessToken!,
+                new SignedRequestHeaders(signature, nonce, digest));
+
+            SetStatus(active is null ? AuthStatus.LoggedOut : AuthStatus.Authorized);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Ошибка проверки сессии");
+            _error = ex;
+            SetStatus(AuthStatus.Error);
+        }
+    }
+
+    public void CancelQrAuth()
+    {
+        _waitCts?.Cancel();
+        _waitCts?.Dispose();
+        _waitCts = null;
+        _qrData = null;
     }
 
     public void Reset()
     {
-        _status = AuthStatus.Unknown;
-        _qrData = null;
+        CancelQrAuth();
+        _store.Clear();
         _error = null;
+        SetStatus(AuthStatus.Unknown);
         _logger.LogInformation("Данные авторизации очищены");
     }
 
-    private RegisterRequest CreateRegisterRequest()
+    private void SetStatus(AuthStatus status)
     {
-        var request = new RegisterRequest
-        {
-            Udid = _crypto.Udid,
-            SignPubKey = _crypto.PublicKeyBase64
-        };
-        return _deviceInfo.Apply(request);
+        _status = status;
+        StateChanged?.Invoke(this, EventArgs.Empty);
     }
 
-    private QrAuthRequest CreateQrAuthRequest(string registrationId, string registrationToken)
+    private QrAuthRequest CreateQrAuthRequest()
     {
         var request = new QrAuthRequest
         {
-            RegistrationId = registrationId,
-            RegistrationToken = registrationToken,
+            RegistrationId = _crypto.RegistrationId,
+            RegistrationToken = _crypto.RegistrationToken,
             SignPubKey = _crypto.PublicKeyBase64,
             Udid = _crypto.Udid
         };
+
         return _deviceInfo.Apply(request);
     }
 }
