@@ -1,3 +1,5 @@
+using System.Runtime.InteropServices;
+using System.Text;
 using Microsoft.Extensions.Logging;
 
 namespace ExpressApp.Auth.Logging;
@@ -11,6 +13,43 @@ namespace ExpressApp.Auth.Logging;
 public sealed class ConsoleLoggerProvider : ILoggerProvider
 {
     private static readonly object ConsoleLock = new();
+
+    static ConsoleLoggerProvider()
+    {
+        // Консоль Windows живёт в OEM-кодовой странице (866/437), а .NET пишет
+        // строки как есть — кириллица в логах превращается в «кракозябры».
+        // Приводим и кодовую страницу консоли, и Encoding потока вывода к UTF-8.
+        TryUseUtf8Console();
+    }
+
+    private static void TryUseUtf8Console()
+    {
+        if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+        {
+            return;
+        }
+
+        try
+        {
+            // Меняем кодовую страницу вывода самой консоли, иначе она
+            // интерпретирует UTF-8 байты как OEM-866.
+            SetConsoleOutputCP(Utf8CodePage);
+
+            // Без флага «без BOM» в начало вывода попадает U+FEFF.
+            Console.OutputEncoding = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
+        }
+        catch (IOException)
+        {
+            // Вывод перенаправлен либо консоли нет (запуск из IDE без терминала) —
+            // логи всё равно уйдут в Debug-провайдер, коددировку не трогаем.
+        }
+    }
+
+    private const uint Utf8CodePage = 65001;
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetConsoleOutputCP(uint wCodePageID);
 
     public ILogger CreateLogger(string categoryName) => new ConsoleLogger(categoryName);
 

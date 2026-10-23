@@ -38,12 +38,10 @@ public static class MauiProgram
         builder.Services.AddTransient<MainPage>();
         builder.Services.AddTransient<AppShell>();
 
-#if DEBUG
-        // Логирование в консоль (Debug-провайдер в unpackaged-сборке
+// Логирование в консоль (Debug-провайдер в unpackaged-сборке
         // пишет только в отладчик, поэтому добавляем консольный провайдер)
         builder.Logging.AddProvider(new ConsoleLoggerProvider());
         builder.Logging.SetMinimumLevel(LogLevel.Debug);
-#endif
 
         var app = builder.Build();
 
