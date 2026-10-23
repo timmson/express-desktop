@@ -2,8 +2,9 @@
 
 		<PropertyGroup>
 			<TargetFrameworks>net10.0-maccatalyst</TargetFrameworks>
-		<!-- Uncomment to also build the tizen app. You will need to install tizen by following this: https://github.com/Samsung/Tizen.NET -->
-		<!-- <TargetFrameworks>$(TargetFrameworks);net9.0-tizen</TargetFrameworks> -->
+			<!-- На Windows собираем только нативную сборку: maccatalyst требует macOS/Xcode -->
+			<!-- TargetFrameworks Condition="$([MSBuild]::IsOSPlatform('macos'))">net10.0-maccatalyst</TargetFrameworks-->
+			<TargetFrameworks Condition="$([MSBuild]::IsOSPlatform('windows'))">net10.0-windows10.0.19041.0</TargetFrameworks>
 
 		<!-- Note for MacCatalyst:
 		The default runtime is maccatalyst-x64, except in Release config, in which case the default is maccatalyst-x64;maccatalyst-arm64.
