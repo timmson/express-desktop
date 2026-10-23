@@ -85,6 +85,21 @@ public sealed class QrAuthResponse
 
     [JsonPropertyName("status")]
     public string? Status { get; set; }
+
+    [JsonPropertyName("registration_id")]
+    public string? RegistrationId { get; set; }
+
+    /// <summary>Зашифрованный blob данных регистрации (base64), выдаётся сервером.</summary>
+    [JsonPropertyName("registration_data")]
+    public string? RegistrationData { get; set; }
+
+    /// <summary>Токен CTS-сервиса, привязанный к подтверждённой регистрации.</summary>
+    [JsonPropertyName("cts_registration_token")]
+    public string? CtsRegistrationToken { get; set; }
+
+    /// <summary>Токен RTS-сервиса, привязанный к подтверждённой регистрации.</summary>
+    [JsonPropertyName("rts_registration_token")]
+    public string? RtsRegistrationToken { get; set; }
 }
 
 public sealed class TokenActiveResponse

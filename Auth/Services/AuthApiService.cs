@@ -42,7 +42,7 @@ public sealed class AuthApiService : IAuthApiService
         => SendAsync<RegisterResponse>(HttpMethod.Post, path, body, auth);
 
     public Task<QrAuthResponse> RequestQrAsync(string path, byte[] body, SignedRequestHeaders auth)
-        => SendAsync<QrAuthResponse>(HttpMethod.Post, path, body, auth);
+        => SendWrappedAsync<QrAuthResponse>(HttpMethod.Post, path, body, auth);
 
     public async Task<TokenActiveResponse?> CheckTokenActiveAsync(string accessToken, SignedRequestHeaders auth)
     {
@@ -62,6 +62,60 @@ public sealed class AuthApiService : IAuthApiService
         response.EnsureSuccessStatusCode();
         var result = await ReadJsonAsync<T>(response);
         return result ?? throw new InvalidOperationException($"Пустой ответ от {path}");
+    }
+
+    /// <summary>
+    /// То же, что <see cref="SendAsync{T}"/>, но дополнительно разбирает ответ
+    /// в обёртке <c>{ "status": ..., "result": { ... } }</c>.
+    /// Если обёртки нет, данные читаются из корня — так метод остаётся
+    /// рабочим при любом варианте формата ответа.
+    /// </summary>
+    private async Task<T> SendWrappedAsync<T>(HttpMethod method, string path, byte[]? body, SignedRequestHeaders auth)
+        where T : class
+    {
+        using var response = await SendRawAsync(method, path, body, auth, null);
+        response.EnsureSuccessStatusCode();
+
+        var json = await response.Content.ReadAsStringAsync();
+        if (string.IsNullOrWhiteSpace(json))
+        {
+            throw new InvalidOperationException($"Пустой ответ от {path}");
+        }
+
+        using var document = JsonDocument.Parse(json);
+        var root = document.RootElement;
+        JsonElement source = root;
+        var wrapped = false;
+
+        // corp.express кладёт полезную нагрузку в result; status остаётся на уровне обёртки.
+        if (root.ValueKind == JsonValueKind.Object
+            && root.TryGetProperty("result", out var result)
+            && result.ValueKind == JsonValueKind.Object)
+        {
+            source = result;
+            wrapped = true;
+        }
+
+        var payload = source.Deserialize<T>(JsonOptions.Default)
+                     ?? throw new InvalidOperationException($"Не удалось разобрать ответ от {path}");
+
+        // status в обёртке относится к запросу, а не к объекту — если в result его нет,
+        // берём верхнеуровневый, чтобы UI продолжал получать значение.
+        if (wrapped && root.TryGetProperty("status", out var envelopeStatus)
+            && envelopeStatus.ValueKind == JsonValueKind.String)
+        {
+            ApplyEnvelopeStatus(payload, envelopeStatus.GetString());
+        }
+
+        return payload;
+    }
+
+    private static void ApplyEnvelopeStatus<T>(T payload, string? status)
+    {
+        if (payload is QrAuthResponse qr && string.IsNullOrEmpty(qr.Status))
+        {
+            qr.Status = status;
+        }
     }
 
     private async Task<HttpResponseMessage> SendRawAsync(

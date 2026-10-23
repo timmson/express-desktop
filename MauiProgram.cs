@@ -2,6 +2,7 @@ using ExpressApp.Auth;
 using ExpressApp.Auth.Logging;
 using ExpressApp.Auth.Qr;
 using ExpressApp.Auth.Services;
+using ExpressApp.Settings;
 using Microsoft.Extensions.Logging;
 
 namespace ExpressApp;
@@ -18,6 +19,9 @@ public static class MauiProgram
                 fonts.AddFont("OpenSans-Regular.ttf", "OpenSansRegular");
                 fonts.AddFont("OpenSans-Semibold.ttf", "OpenSansSemibold");
             });
+
+        // DI-сервисы модуля настроек
+        builder.Services.AddSingleton<ISettingsStore, FileSettingsStore>();
 
         // DI-сервисы модуля аутентификации
         builder.Services.AddSingleton<IAuthStateStore, PreferencesAuthStateStore>();

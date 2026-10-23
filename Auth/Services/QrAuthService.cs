@@ -1,5 +1,6 @@
 using ExpressApp.Auth.Models;
 using ExpressApp.Auth.Qr;
+using ExpressApp.Settings;
 using Microsoft.Extensions.Logging;
 
 namespace ExpressApp.Auth.Services;
@@ -65,6 +66,7 @@ public sealed class QrAuthService : IAuthService
     private readonly IDeviceInformation _deviceInfo;
     private readonly IQrCodeRenderer _qrRenderer;
     private readonly IAuthStateStore _store;
+    private readonly ISettingsStore _settings;
     private readonly ILogger<QrAuthService> _logger;
 
     private AuthStatus _status = AuthStatus.Unknown;
@@ -84,6 +86,7 @@ public sealed class QrAuthService : IAuthService
         IDeviceInformation deviceInfo,
         IQrCodeRenderer qrRenderer,
         IAuthStateStore store,
+        ISettingsStore settings,
         ILogger<QrAuthService> logger)
     {
         _crypto = crypto;
@@ -91,6 +94,7 @@ public sealed class QrAuthService : IAuthService
         _deviceInfo = deviceInfo;
         _qrRenderer = qrRenderer;
         _store = store;
+        _settings = settings;
         _logger = logger;
     }
 
@@ -111,6 +115,66 @@ public sealed class QrAuthService : IAuthService
         return JsonSerializer.Serialize(payload, JsonOptions.Default);
     }
 
+    /// <summary>
+    /// Фиксирует параметры текущей регистрации в ~/.express/settings.json.
+    /// Делается именно при генерации QR: с этого момента кодом может воспользоваться
+    /// мобильное приложение, и значения должны переживать перезапуск десктопа.
+    /// </summary>
+    private void PersistRegistrationSettings()
+    {
+        try
+        {
+            _settings.Update(settings =>
+            {
+                var registration = settings.EnsureRegistration();
+                registration.GeneratedAt = DateTimeOffset.UtcNow;
+                registration.RegistrationId = _crypto.RegistrationId;
+                registration.RegistrationToken = _crypto.RegistrationToken;
+                registration.RegistrationKey = _crypto.PrivateKeySeedBase64;
+            });
+
+            _logger.LogInformation("Параметры регистрации сохранены в {FilePath}", _settings.FilePath);
+        }
+        catch (Exception ex)
+        {
+            // Настройки — удобная копия состояния, а не условие входа:
+            // сбой записи не должен срывать авторизацию.
+            _logger.LogError(ex, "Не удалось сохранить параметры регистрации в {FilePath}", _settings.FilePath);
+        }
+    }
+
+    /// <summary>
+    /// Фиксирует в ~/.express/settings.json ключи сессии, полученные от сервера
+    /// после подтверждения QR. Разные от локальных параметров регистрации: их
+    /// невозможно восстановить без ответа сервера, поэтому они и сохраняются.
+    /// </summary>
+    private void PersistSessionKeys(QrAuthResponse response)
+    {
+        try
+        {
+            _settings.Update(settings =>
+            {
+                var registration = settings.EnsureRegistration();
+                registration.RegistrationData = response.RegistrationData;
+                registration.CtsRegistrationToken = response.CtsRegistrationToken;
+                registration.RtsRegistrationToken = response.RtsRegistrationToken;
+
+                // Сервер может вернуть подтверждённый registration_id — он и есть
+                // итоговый, локальный мог быть черновиком.
+                if (!string.IsNullOrEmpty(response.RegistrationId))
+                {
+                    registration.RegistrationId = response.RegistrationId;
+                }
+            });
+
+            _logger.LogInformation("Ключи сессии сохранены в {FilePath}", _settings.FilePath);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Не удалось сохранить ключи сессии в {FilePath}", _settings.FilePath);
+        }
+    }
+
     public Task StartQrAuthAsync(CancellationToken cancellationToken = default)
     {
         CancelQrAuth();
@@ -123,6 +187,8 @@ public sealed class QrAuthService : IAuthService
 
             var payload = BuildQrPayload();
             var svg = _qrRenderer.Render(payload);
+
+            PersistRegistrationSettings();
 
             _logger.LogInformation(
                 "QR payload сформирован локально: {Modules}×{Modules} модулей (QR v{QrVersion}, payload v{PayloadVersion})",
@@ -177,6 +243,8 @@ public sealed class QrAuthService : IAuthService
                 "Сервер подтвердил QR-запрос: requestId={RequestId} status={Status}",
                 response.QrRequestId,
                 response.Status);
+
+            PersistSessionKeys(response);
 
             if (_qrData is { } current)
             {
@@ -253,6 +321,7 @@ public sealed class QrAuthService : IAuthService
     {
         CancelQrAuth();
         _store.Clear();
+        _settings.ClearRegistration();
         _error = null;
         SetStatus(AuthStatus.Unknown);
         _logger.LogInformation("Данные авторизации очищены");
