@@ -33,6 +33,7 @@ public interface IAuthStateStore
     AuthState Load();
     void Save(AuthState state);
     void Clear();
+    void ClearAll();
 }
 
 public sealed class PreferencesAuthStateStore : IAuthStateStore
@@ -50,21 +51,8 @@ public sealed class PreferencesAuthStateStore : IAuthStateStore
         var udid = Preferences.Get(UdidKey, string.Empty);
         var pubKey = Preferences.Get(PublicKeyKey, string.Empty);
         var privKey = Preferences.Get(PrivateKeyKey, (string?)null);
-        var regId = Preferences.Get(RegistrationIdKey, string.Empty);
-        var regToken = Preferences.Get(RegistrationTokenKey, string.Empty);
-
-        // Генерируем registration_id и registration_token при первом запуске
-        if (string.IsNullOrEmpty(regId))
-        {
-            regId = Guid.NewGuid().ToString();
-            Preferences.Set(RegistrationIdKey, regId);
-        }
-
-        if (string.IsNullOrEmpty(regToken))
-        {
-            regToken = Convert.ToBase64String(RandomNumberGenerator.GetBytes(64));
-            Preferences.Set(RegistrationTokenKey, regToken);
-        }
+        var regId = Preferences.Get(RegistrationIdKey, (string?)null);
+        var regToken = Preferences.Get(RegistrationTokenKey, (string?)null);
 
         return new AuthState(
             Udid: udid,
@@ -99,6 +87,19 @@ public sealed class PreferencesAuthStateStore : IAuthStateStore
     {
         foreach (var key in new[]
                  {
+                     RegistrationIdKey, RegistrationTokenKey,
+                     AccessTokenKey, ExpiresAtKey
+                 })
+        {
+            Preferences.Remove(key);
+        }
+    }
+
+    public void ClearAll()
+    {
+        foreach (var key in new[]
+                 {
+                     UdidKey, PublicKeyKey, PrivateKeyKey,
                      RegistrationIdKey, RegistrationTokenKey,
                      AccessTokenKey, ExpiresAtKey
                  })

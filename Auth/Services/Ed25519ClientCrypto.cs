@@ -75,15 +75,6 @@ public sealed class Ed25519ClientCrypto : IClientCrypto
         var seed = _privateKey.GetEncoded();
         PrivateKeySeedBase64 = Convert.ToBase64String(seed);
         PrivateKeyBase64 = Convert.ToBase64String([.. seed, .. _publicKey.GetEncoded()]);
-
-        _store.Save(state with
-        {
-            Udid = Udid,
-            PublicKeyBase64 = PublicKeyBase64,
-            PrivateKeySeedBase64 = PrivateKeyBase64,
-            RegistrationId = RegistrationId,
-            RegistrationToken = RegistrationToken
-        });
     }
 
     private static bool HasStoredKeys(AuthState state)

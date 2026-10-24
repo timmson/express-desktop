@@ -25,7 +25,14 @@ public static class MauiProgram
 
         // DI-сервисы модуля аутентификации
         builder.Services.AddSingleton<IAuthStateStore, PreferencesAuthStateStore>();
-        builder.Services.AddSingleton<IClientCrypto, Ed25519ClientCrypto>();
+        builder.Services.AddTransient<IClientCrypto, Ed25519ClientCrypto>();
+
+        // Встроенный контейнер MS DI не умеет разрешать Func<T> сам — фабрика
+        // регистрируется вручную, чтобы QrAuthService создавал свежую пару ключей
+        // и новые registration_* на каждый QR-код.
+        builder.Services.AddSingleton<Func<IClientCrypto>>(sp =>
+            () => ActivatorUtilities.CreateInstance<Ed25519ClientCrypto>(sp));
+
         builder.Services.AddSingleton<IDeviceInformation, DeviceInformation>();
         builder.Services.AddSingleton<IQrCodeRenderer, QrCodeRenderer>();
 
@@ -36,7 +43,7 @@ public static class MauiProgram
             client.Timeout = TimeSpan.FromSeconds(90);
         });
 
-        builder.Services.AddSingleton<QrAuthService>();
+        builder.Services.AddTransient<QrAuthService>();
 
         // Страницы и Shell resolving через DI (см. App.CreateWindow)
         builder.Services.AddTransient<MainPage>();

@@ -61,7 +61,7 @@ public record QrData(
 
 public sealed class QrAuthService : IAuthService
 {
-    private readonly IClientCrypto _crypto;
+    private readonly Func<IClientCrypto> _cryptoFactory;
     private readonly IAuthApiService _api;
     private readonly IDeviceInformation _deviceInfo;
     private readonly IQrCodeRenderer _qrRenderer;
@@ -73,6 +73,7 @@ public sealed class QrAuthService : IAuthService
     private QrData? _qrData;
     private Exception? _error;
     private CancellationTokenSource? _waitCts;
+    private IClientCrypto? _crypto;
 
     public AuthStatus Status => _status;
     public QrData? QrData => _qrData;
@@ -81,7 +82,7 @@ public sealed class QrAuthService : IAuthService
     public event EventHandler? StateChanged;
 
     public QrAuthService(
-        IClientCrypto crypto,
+        Func<IClientCrypto> cryptoFactory,
         IAuthApiService api,
         IDeviceInformation deviceInfo,
         IQrCodeRenderer qrRenderer,
@@ -89,7 +90,7 @@ public sealed class QrAuthService : IAuthService
         ISettingsStore settings,
         ILogger<QrAuthService> logger)
     {
-        _crypto = crypto;
+        _cryptoFactory = cryptoFactory;
         _api = api;
         _deviceInfo = deviceInfo;
         _qrRenderer = qrRenderer;
@@ -104,11 +105,12 @@ public sealed class QrAuthService : IAuthService
     /// </summary>
     private string BuildQrPayload()
     {
+        var crypto = _crypto ??= _cryptoFactory();
         var payload = new QrPayload
         {
-            RegistrationId = _crypto.RegistrationId,
-            RegistrationToken = _crypto.RegistrationToken,
-            RegistrationKey = _crypto.PrivateKeySeedBase64,
+            RegistrationId = crypto.RegistrationId,
+            RegistrationToken = crypto.RegistrationToken,
+            RegistrationKey = crypto.PrivateKeySeedBase64,
             Version = QrPayload.CurrentVersion
         };
 
@@ -124,13 +126,14 @@ public sealed class QrAuthService : IAuthService
     {
         try
         {
+            var crypto = _crypto ??= _cryptoFactory();
             _settings.Update(settings =>
             {
                 var registration = settings.EnsureRegistration();
                 registration.GeneratedAt = DateTimeOffset.UtcNow;
-                registration.RegistrationId = _crypto.RegistrationId;
-                registration.RegistrationToken = _crypto.RegistrationToken;
-                registration.RegistrationKey = _crypto.PrivateKeySeedBase64;
+                registration.RegistrationId = crypto.RegistrationId;
+                registration.RegistrationToken = crypto.RegistrationToken;
+                registration.RegistrationKey = crypto.PrivateKeySeedBase64;
             });
 
             _logger.LogInformation("Параметры регистрации сохранены в {FilePath}", _settings.FilePath);
@@ -217,16 +220,17 @@ public sealed class QrAuthService : IAuthService
         {
             SetStatus(AuthStatus.RequestingQr);
 
+            var crypto = _crypto ??= _cryptoFactory();
             var request = CreateQrAuthRequest();
             var bodyBytes = JsonSerializer.SerializeToUtf8Bytes(request, JsonOptions.Default);
 
-            var digest = _crypto.ComputeDigest(bodyBytes);
+            var digest = crypto.ComputeDigest(bodyBytes);
             var created = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
-            var nonce = _crypto.NewNonce();
+            var nonce = crypto.NewNonce();
 
             // keyId подписи совпадает с registration_id из тела запроса.
-            var signature = _crypto.BuildSignatureHeader(
-                _crypto.RegistrationId,
+            var signature = crypto.BuildSignatureHeader(
+                crypto.RegistrationId,
                 "post " + AuthApiService.QrRequestPath,
                 created,
                 nonce,
@@ -285,11 +289,12 @@ public sealed class QrAuthService : IAuthService
 
         try
         {
+            var crypto = _crypto ??= _cryptoFactory();
             var created = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
-            var nonce = _crypto.NewNonce();
-            var digest = _crypto.ComputeDigest(ReadOnlySpan<byte>.Empty);
-            var signature = _crypto.BuildSignatureHeader(
-                _crypto.RegistrationId,
+            var nonce = crypto.NewNonce();
+            var digest = crypto.ComputeDigest(ReadOnlySpan<byte>.Empty);
+            var signature = crypto.BuildSignatureHeader(
+                crypto.RegistrationId,
                 "get " + AuthApiService.TokenActivePath,
                 created,
                 nonce,
@@ -320,7 +325,8 @@ public sealed class QrAuthService : IAuthService
     public void Reset()
     {
         CancelQrAuth();
-        _store.Clear();
+        _crypto = null;
+        _store.ClearAll();
         _settings.ClearRegistration();
         _error = null;
         SetStatus(AuthStatus.Unknown);
@@ -335,12 +341,13 @@ public sealed class QrAuthService : IAuthService
 
     private QrAuthRequest CreateQrAuthRequest()
     {
+        var crypto = _crypto ??= _cryptoFactory();
         var request = new QrAuthRequest
         {
-            RegistrationId = _crypto.RegistrationId,
-            RegistrationToken = _crypto.RegistrationToken,
-            SignPubKey = _crypto.PublicKeyBase64,
-            Udid = _crypto.Udid
+            RegistrationId = crypto.RegistrationId,
+            RegistrationToken = crypto.RegistrationToken,
+            SignPubKey = crypto.PublicKeyBase64,
+            Udid = crypto.Udid
         };
 
         return _deviceInfo.Apply(request);
