@@ -1,3 +1,4 @@
+using System.Text;
 using Microsoft.Extensions.Logging;
 
 namespace ExpressApp.Settings;
@@ -119,7 +120,8 @@ public sealed class FileSettingsStore : ISettingsStore
     {
         lock (Gate)
         {
-            WriteUnchecked(settings);
+            _logger.LogDebug("Сохраняем настройки: полная запись {FilePath}", FilePath);
+            WriteUnchecked(settings, "полная запись");
         }
     }
 
@@ -127,9 +129,10 @@ public sealed class FileSettingsStore : ISettingsStore
     {
         lock (Gate)
         {
+            _logger.LogDebug("Обновляем настройки: чтение и правка {FilePath}", FilePath);
             var settings = ReadUnchecked();
             mutate(settings);
-            WriteUnchecked(settings);
+            WriteUnchecked(settings, "обновление");
         }
     }
 
@@ -155,7 +158,7 @@ public sealed class FileSettingsStore : ISettingsStore
         }
     }
 
-    private void WriteUnchecked(AppSettings settings)
+    private void WriteUnchecked(AppSettings settings, string operation)
     {
         var directory = Path.GetDirectoryName(FilePath)!;
         Directory.CreateDirectory(directory);
@@ -163,9 +166,37 @@ public sealed class FileSettingsStore : ISettingsStore
         // Запись через временный файл: при сбое питания/процесса остаётся либо
         // старая, либо новая целостная версия settings.json.
         var tempPath = FilePath + ".tmp";
-        File.WriteAllText(tempPath, JsonSerializer.Serialize(settings, SerializerOptions));
-        File.Move(tempPath, FilePath, overwrite: true);
+        var json = JsonSerializer.Serialize(settings, SerializerOptions);
 
-        _logger.LogDebug("Настройки сохранены в {FilePath}", FilePath);
+        try
+        {
+            File.WriteAllText(tempPath, json);
+            File.Move(tempPath, FilePath, overwrite: true);
+        }
+        catch (Exception ex)
+        {
+            TryDeleteTemp(tempPath);
+            _logger.LogError(ex, "Не удалось {Operation}: {FilePath}", operation, FilePath);
+            throw;
+        }
+
+        _logger.LogDebug(
+            "Настройки сохранены ({Operation}): {FilePath}, {Bytes} байт",
+            operation, FilePath, Encoding.UTF8.GetByteCount(json));
+    }
+
+    private static void TryDeleteTemp(string tempPath)
+    {
+        try
+        {
+            if (File.Exists(tempPath))
+            {
+                File.Delete(tempPath);
+            }
+        }
+        catch (IOException)
+        {
+            // Остаток temp-файла безвреден: следующий File.Move перезапишет его.
+        }
     }
 }
