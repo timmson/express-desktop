@@ -116,15 +116,6 @@ public partial class MainPage : ContentPage
             DrawQr(qrData.Payload);
         }
 
-        QrDataBorder.IsVisible = qrData is not null;
-        if (qrData is not null)
-        {
-            QrPayloadLabel.Text = qrData.Payload;
-            QrExpiresLabel.Text = qrData.ExpiresAt is { } expires
-                ? $"Действителен до: {expires:yyyy-MM-dd HH:mm:ss} · статус: {qrData.Status ?? "—"}"
-                : "Срок действия: уточняется сервером";
-        }
-
         // Таймер обратного отсчёта
         if (showQr && qrData is not null && qrData.ExpiresAt is { } expiresAt)
         {

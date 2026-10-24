@@ -59,24 +59,6 @@
                 HorizontalTextAlignment="Center"
                 IsVisible="False" />
 
-            <!-- Технические детали для отладки -->
-            <Border
-                x:Name="QrDataBorder"
-                StrokeShape="RoundRectangle 8"
-                StrokeThickness="1"
-                Stroke="{StaticResource Secondary}"
-                Background="{StaticResource Gray100}"
-                IsVisible="False"
-                Padding="16">
-
-                <VerticalStackLayout Spacing="8">
-                    <Label Text="Payload QR-кода:" FontAttributes="Bold" TextColor="{StaticResource Gray950}" />
-                    <Label x:Name="QrPayloadLabel" Text="" TextColor="{StaticResource Gray950}"
-                           FontSize="Micro" LineBreakMode="WordWrap" />
-                    <Label x:Name="QrExpiresLabel" Text="" TextColor="{StaticResource Gray600}" FontSize="Small" />
-                </VerticalStackLayout>
-            </Border>
-
             <Label
                 x:Name="CountdownLabel"
                 Text=""
