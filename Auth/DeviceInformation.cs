@@ -23,20 +23,20 @@ public sealed class DeviceInformation : IDeviceInformation
     public DeviceMeta BuildMeta() => new()
     {
         Pushes = false,
-        Timezone = ResolveTimezone(),
+        Timezone = "Europe/Moscow",
         Permissions = new DevicePermissions { Notifications = false }
     };
 
     public RegisterRequest Apply(RegisterRequest request)
     {
         request.AppVersion = AppVersion;
-        request.Device = ResolveDevice();
-        request.DeviceSoftware = ResolveSoftware();
+        request.Device = "Chrome 155.0";
+        request.DeviceSoftware = "Windows 11";
         request.DeviceHostname = null;
         request.DeviceMeta = BuildMeta();
-        request.Locale = ResolveLocale();
-        request.Manufacturer = "Unknown";
-        request.Platform = ResolvePlatform();
+        request.Locale = "ru";
+        request.Manufacturer = "Google";
+        request.Platform = "web";
         request.PlatformPackageId = PlatformPackageId;
         return request;
     }
@@ -44,48 +44,15 @@ public sealed class DeviceInformation : IDeviceInformation
     public QrAuthRequest Apply(QrAuthRequest request)
     {
         request.AppVersion = AppVersion;
-        request.Device = ResolveDevice();
-        request.DeviceSoftware = ResolveSoftware();
+        request.Device = "Chrome 155.0";
+        request.DeviceSoftware = "Windows 11";
         request.DeviceHostname = null;
         request.DeviceMeta = BuildMeta();
-        request.Locale = ResolveLocale();
-        request.Manufacturer = "Unknown";
-        request.Platform = ResolvePlatform();
+        request.Locale = "ru";
+        request.Manufacturer = "Google";
+        request.Platform = "web";
         request.PlatformPackageId = PlatformPackageId;
         return request;
-    }
-
-    private static string ResolveDevice()
-    {
-        var name = NullToDefault(DeviceInfo.Current.Name, "desktop");
-        var model = NullToDefault(DeviceInfo.Current.Model, string.Empty);
-        return string.IsNullOrEmpty(model) || model == name ? name : $"{name} ({model})";
-    }
-
-    private static string ResolveSoftware()
-        => NullToDefault(DeviceInfo.Current.VersionString, "unknown");
-
-    private static string ResolvePlatform()
-    {
-        return "web";
-    }
-
-    private static string ResolveLocale()
-    {
-        var culture = CultureInfo.CurrentUICulture.Name;
-        return string.IsNullOrEmpty(culture) ? "ru" : culture.Split('-')[0];
-    }
-
-    private static string ResolveTimezone()
-    {
-        try
-        {
-            return TimeZoneInfo.Local.Id;
-        }
-        catch (Exception)
-        {
-            return "Europe/Moscow";
-        }
     }
 
     private static string NullToDefault(string? value, string fallback)

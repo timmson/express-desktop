@@ -45,7 +45,7 @@ public sealed class QrAuthRequest
     public string Udid { get; set; } = string.Empty;
 
     [JsonPropertyName("app_version")]
-    public string AppVersion { get; set; } = "1.0.0";
+    public string AppVersion { get; set; } = "3.75.58";
 
     [JsonPropertyName("device")]
     public string Device { get; set; } = "eXpress Desktop";
