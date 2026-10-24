@@ -35,7 +35,7 @@ public sealed class DeviceInformation : IDeviceInformation
         request.DeviceHostname = null;
         request.DeviceMeta = BuildMeta();
         request.Locale = ResolveLocale();
-        request.Manufacturer = NullToDefault(DeviceInfo.Current.Manufacturer, "Unknown");
+        request.Manufacturer = "Unknown";
         request.Platform = ResolvePlatform();
         request.PlatformPackageId = PlatformPackageId;
         return request;
@@ -49,7 +49,7 @@ public sealed class DeviceInformation : IDeviceInformation
         request.DeviceHostname = null;
         request.DeviceMeta = BuildMeta();
         request.Locale = ResolveLocale();
-        request.Manufacturer = NullToDefault(DeviceInfo.Current.Manufacturer, "Unknown");
+        request.Manufacturer = "Unknown";
         request.Platform = ResolvePlatform();
         request.PlatformPackageId = PlatformPackageId;
         return request;
