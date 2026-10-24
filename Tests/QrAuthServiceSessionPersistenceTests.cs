@@ -59,7 +59,8 @@ public sealed class QrAuthServiceSessionPersistenceTests : IDisposable
 
         var apiMock = new Mock<IAuthApiService>();
         apiMock.Setup(a => a.RequestQrAsync(
-                It.IsAny<string>(), It.IsAny<byte[]>(), It.IsAny<SignedRequestHeaders>()))
+                It.IsAny<string>(), It.IsAny<byte[]>(), It.IsAny<SignedRequestHeaders>(),
+                It.IsAny<CancellationToken>()))
             .ReturnsAsync(expectedResponse);
 
         var deviceInfoMock = new Mock<IDeviceInformation>();

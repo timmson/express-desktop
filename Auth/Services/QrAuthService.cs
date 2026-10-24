@@ -82,6 +82,11 @@ public sealed class QrAuthService : IAuthService
     private CancellationTokenSource? _timerCts;
     private IClientCrypto? _crypto;
 
+    // Счётчик запусков ожидания. Ответ long-polling приходит через минуты после
+    // отмены, поэтому цикл сверяет свой номер с текущим и не трогает состояние,
+    // если его уже сменил более новый запуск.
+    private int _generation;
+
     public AuthStatus Status => _status;
     public QrData? QrData => _qrData;
     public Exception? Error => _error;
@@ -193,10 +198,11 @@ public sealed class QrAuthService : IAuthService
 
     public Task StartQrAuthAsync(CancellationToken cancellationToken = default)
     {
+        // Отмена заодно инвалидирует все ранее запущенные циклы ожидания.
         CancelQrAuth();
         _waitCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         var token = _waitCts.Token;
-
+        var generation = _generation;
         try
         {
             _error = null;
@@ -220,7 +226,7 @@ public sealed class QrAuthService : IAuthService
 
             // Пункт 5: long-polling — соединение держится до сканирования кода.
             // Ответ сервера нужен только как подтверждение, содержимое QR не меняет.
-            _ = Task.Run(() => WaitForConfirmationAsync(token), CancellationToken.None);
+            _ = Task.Run(() => WaitForConfirmationAsync(token, generation), CancellationToken.None);
         }
         catch (Exception ex)
         {
@@ -248,13 +254,13 @@ public sealed class QrAuthService : IAuthService
         }
     }
 
-    private async Task WaitForConfirmationAsync(CancellationToken token)
+    private async Task WaitForConfirmationAsync(CancellationToken token, int generation)
     {
         while (!token.IsCancellationRequested)
         {
             try
             {
-                SetStatus(AuthStatus.RequestingQr);
+                SetStatus(AuthStatus.RequestingQr, generation);
 
                 // Каждый цикл создаём свежие ключи и payload
                 _crypto = _cryptoFactory();
@@ -275,16 +281,25 @@ public sealed class QrAuthService : IAuthService
                 var response = await _api.RequestQrAsync(
                     AuthApiService.QrRequestPath,
                     bodyBytes,
-                    new SignedRequestHeaders(signature, nonce, digest));
-
-                token.ThrowIfCancellationRequested();
+                    new SignedRequestHeaders(signature, nonce, digest),
+                    token);
 
                 _logger.LogInformation(
                     "Сервер подтвердил QR-запрос: requestId={RequestId} status={Status}",
                     response.QrRequestId,
                     response.Status);
 
+                // Ключи сессии пишем до проверки отмены: их выдал сервер, и
+                // восстановить их без ответа невозможно, даже если экран уже закрыли.
                 PersistSessionKeys(response);
+
+                if (!IsCurrent(generation))
+                {
+                    _logger.LogWarning(
+                        "Ответ сервера получен, но ожидание уже отменено — статус не меняем (поколение {Generation})",
+                        generation);
+                    break;
+                }
 
                 if (_qrData is { } current)
                 {
@@ -295,18 +310,29 @@ public sealed class QrAuthService : IAuthService
                     };
                 }
 
-                SetStatus(AuthStatus.Authorized);
+                SetStatus(AuthStatus.Authorized, generation);
                 break;
             }
             catch (OperationCanceledException)
             {
+                if (!IsCurrent(generation))
+                {
+                    _logger.LogDebug("Устаревший цикл ожидания остановлен (поколение {Generation})", generation);
+                    break;
+                }
+
                 _logger.LogInformation("Ожидание сканирования отменено");
                 _qrData = null;
-                SetStatus(AuthStatus.LoggedOut);
+                SetStatus(AuthStatus.LoggedOut, generation);
                 break;
             }
             catch (HttpRequestException ex) when (ex.StatusCode == System.Net.HttpStatusCode.RequestTimeout)
             {
+                if (!IsCurrent(generation))
+                {
+                    break;
+                }
+
                 // 408 — запрос истёк, пересоздаём QR с новыми параметрами
                 _logger.LogWarning("Сервер вернул 408 — пересоздаём QR-код с новыми параметрами");
 
@@ -321,7 +347,7 @@ public sealed class QrAuthService : IAuthService
                     svg.Modules, svg.Modules);
 
                 _qrData = new QrData(payload, svg.Markup, ExpiresAt: expiresAt, Status: null);
-                SetStatus(AuthStatus.WaitingForScan);
+                SetStatus(AuthStatus.WaitingForScan, generation);
 
                 // Даем UI обновиться перед следующей попыткой
                 await Task.Delay(500, token);
@@ -329,6 +355,14 @@ public sealed class QrAuthService : IAuthService
             }
             catch (Exception ex)
             {
+                if (!IsCurrent(generation))
+                {
+                    _logger.LogDebug(
+                        "Устаревший цикл ожидания завершён с ошибкой (поколение {Generation}): {Error}",
+                        generation, ex.Message);
+                    break;
+                }
+
                 _logger.LogError(ex, "Ошибка при ожидании подтверждения QR-кода");
                 _error = ex;
                 SetStatus(AuthStatus.Error);
@@ -336,6 +370,9 @@ public sealed class QrAuthService : IAuthService
             }
         }
     }
+
+    /// <summary>True, если цикл ещё актуален: его не отменили запуском нового QR или сбросом.</summary>
+    private bool IsCurrent(int generation) => generation == _generation;
 
     public async Task CheckSessionAsync()
     {
@@ -378,6 +415,10 @@ public sealed class QrAuthService : IAuthService
 
     public void CancelQrAuth()
     {
+        // Инкремент до отмены: фоновый цикл по номеру поймёт, что он устарел,
+        // даже если ответ сервера придёт позже.
+        _generation++;
+
         _timerCts?.Cancel();
         _timerCts?.Dispose();
         _timerCts = null;
@@ -403,6 +444,20 @@ public sealed class QrAuthService : IAuthService
     {
         _status = status;
         StateChanged?.Invoke(this, EventArgs.Empty);
+    }
+
+    /// <summary>
+    /// Смена статуса от имени конкретного цикла ожидания: устаревший цикл
+    /// (его уже отменили) не должен переводить UI в своё состояние.
+    /// </summary>
+    private void SetStatus(AuthStatus status, int generation)
+    {
+        if (!IsCurrent(generation))
+        {
+            return;
+        }
+
+        SetStatus(status);
     }
 
     private QrAuthRequest CreateQrAuthRequest()

@@ -11,11 +11,14 @@ namespace ExpressApp.Auth.Services;
 /// </summary>
 public interface IAuthApiService
 {
-    Task<RegisterResponse> RegisterAsync(string path, byte[] body, SignedRequestHeaders auth);
+    Task<RegisterResponse> RegisterAsync(
+        string path, byte[] body, SignedRequestHeaders auth, CancellationToken cancellationToken = default);
 
-    Task<QrAuthResponse> RequestQrAsync(string path, byte[] body, SignedRequestHeaders auth);
+    Task<QrAuthResponse> RequestQrAsync(
+        string path, byte[] body, SignedRequestHeaders auth, CancellationToken cancellationToken = default);
 
-    Task<TokenActiveResponse?> CheckTokenActiveAsync(string accessToken, SignedRequestHeaders auth);
+    Task<TokenActiveResponse?> CheckTokenActiveAsync(
+        string accessToken, SignedRequestHeaders auth, CancellationToken cancellationToken = default);
 }
 
 /// <summary>
@@ -38,15 +41,19 @@ public sealed class AuthApiService : IAuthApiService
         _logger = logger;
     }
 
-    public Task<RegisterResponse> RegisterAsync(string path, byte[] body, SignedRequestHeaders auth)
-        => SendAsync<RegisterResponse>(HttpMethod.Post, path, body, auth);
+    public Task<RegisterResponse> RegisterAsync(
+        string path, byte[] body, SignedRequestHeaders auth, CancellationToken cancellationToken = default)
+        => SendAsync<RegisterResponse>(HttpMethod.Post, path, body, auth, cancellationToken);
 
-    public Task<QrAuthResponse> RequestQrAsync(string path, byte[] body, SignedRequestHeaders auth)
-        => SendWrappedAsync<QrAuthResponse>(HttpMethod.Post, path, body, auth);
+    public Task<QrAuthResponse> RequestQrAsync(
+        string path, byte[] body, SignedRequestHeaders auth, CancellationToken cancellationToken = default)
+        => SendWrappedAsync<QrAuthResponse>(HttpMethod.Post, path, body, auth, cancellationToken);
 
-    public async Task<TokenActiveResponse?> CheckTokenActiveAsync(string accessToken, SignedRequestHeaders auth)
+    public async Task<TokenActiveResponse?> CheckTokenActiveAsync(
+        string accessToken, SignedRequestHeaders auth, CancellationToken cancellationToken = default)
     {
-        using var response = await SendRawAsync(HttpMethod.Get, TokenActivePath, null, auth, accessToken);
+        using var response = await SendRawAsync(
+            HttpMethod.Get, TokenActivePath, null, auth, accessToken, cancellationToken);
         if (response.StatusCode == System.Net.HttpStatusCode.Unauthorized ||
             response.StatusCode == System.Net.HttpStatusCode.Forbidden)
         {
@@ -56,9 +63,10 @@ public sealed class AuthApiService : IAuthApiService
         return await ReadJsonAsync<TokenActiveResponse>(response);
     }
 
-    private async Task<T> SendAsync<T>(HttpMethod method, string path, byte[]? body, SignedRequestHeaders auth)
+    private async Task<T> SendAsync<T>(
+        HttpMethod method, string path, byte[]? body, SignedRequestHeaders auth, CancellationToken cancellationToken)
     {
-        using var response = await SendRawAsync(method, path, body, auth, null);
+        using var response = await SendRawAsync(method, path, body, auth, null, cancellationToken);
         response.EnsureSuccessStatusCode();
         var result = await ReadJsonAsync<T>(response);
         return result ?? throw new InvalidOperationException($"Пустой ответ от {path}");
@@ -70,10 +78,11 @@ public sealed class AuthApiService : IAuthApiService
     /// Если обёртки нет, данные читаются из корня — так метод остаётся
     /// рабочим при любом варианте формата ответа.
     /// </summary>
-    private async Task<T> SendWrappedAsync<T>(HttpMethod method, string path, byte[]? body, SignedRequestHeaders auth)
+    private async Task<T> SendWrappedAsync<T>(
+        HttpMethod method, string path, byte[]? body, SignedRequestHeaders auth, CancellationToken cancellationToken)
         where T : class
     {
-        using var response = await SendRawAsync(method, path, body, auth, null);
+        using var response = await SendRawAsync(method, path, body, auth, null, cancellationToken);
         response.EnsureSuccessStatusCode();
 
         var json = await response.Content.ReadAsStringAsync();
@@ -123,7 +132,8 @@ public sealed class AuthApiService : IAuthApiService
         string path,
         byte[]? body,
         SignedRequestHeaders auth,
-        string? accessToken)
+        string? accessToken,
+        CancellationToken cancellationToken)
     {
         using var request = new HttpRequestMessage(method, path);
 
@@ -155,7 +165,17 @@ public sealed class AuthApiService : IAuthApiService
         {
             // Long-polling на mobile_to_web/request: соединение держится до
             // сканирования кода, поэтому общий timeout HttpClient снят (см. MauiProgram).
-            response = await _http.SendAsync(request);
+            // Токен обязателен: без него отменённый цикл ждёт ответ сервера и
+            // «оживает» спустя минуты, перетирая состояние нового запуска.
+            response = await _http.SendAsync(request, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            // Штатная отмена (сброс или повторный запуск), а не сетевой сбой.
+            _logger.LogInformation(
+                "HTTP {Method} {Path} отменён после {Elapsed}ms",
+                method.Method, path, stopWatch.ElapsedMilliseconds);
+            throw;
         }
         catch (Exception ex)
         {
