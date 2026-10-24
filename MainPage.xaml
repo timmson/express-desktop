@@ -77,6 +77,16 @@
                 </VerticalStackLayout>
             </Border>
 
+            <Label
+                x:Name="CountdownLabel"
+                Text=""
+                TextColor="{StaticResource Primary}"
+                FontSize="Small"
+                FontAttributes="Bold"
+                HorizontalOptions="Center"
+                HorizontalTextAlignment="Center"
+                IsVisible="False" />
+
             <Button
                 x:Name="StartQrButton"
                 Text="Показать QR-код"

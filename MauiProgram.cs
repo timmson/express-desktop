@@ -36,11 +36,11 @@ public static class MauiProgram
         builder.Services.AddSingleton<IDeviceInformation, DeviceInformation>();
         builder.Services.AddSingleton<IQrCodeRenderer, QrCodeRenderer>();
 
-        // HttpClient с увеличенным таймаутом для long-polling (до 90 с на запрос)
+        // HttpClient с увеличенным таймаутом для long-polling (до 120 с на запрос)
         builder.Services.AddHttpClient<IAuthApiService, AuthApiService>(client =>
         {
             client.BaseAddress = new Uri("https://ru.public.express");
-            client.Timeout = TimeSpan.FromSeconds(90);
+            client.Timeout = TimeSpan.FromSeconds(120);
         });
 
         builder.Services.AddTransient<QrAuthService>();

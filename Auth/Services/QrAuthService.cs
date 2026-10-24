@@ -57,7 +57,13 @@ public record QrData(
     string Payload,
     string Svg,
     DateTime? ExpiresAt,
-    string? Status);
+    string? Status)
+{
+    /// <summary>Оставшееся время валидности QR-кода в секундах (−1 если сервер ещё не сообщил срок).</summary>
+    public int RemainingSeconds => ExpiresAt is { } exp
+        ? Math.Max(0, (int)Math.Round((exp - DateTime.UtcNow).TotalSeconds))
+        : -1;
+}
 
 public sealed class QrAuthService : IAuthService
 {
@@ -73,6 +79,7 @@ public sealed class QrAuthService : IAuthService
     private QrData? _qrData;
     private Exception? _error;
     private CancellationTokenSource? _waitCts;
+    private CancellationTokenSource? _timerCts;
     private IClientCrypto? _crypto;
 
     public AuthStatus Status => _status;
@@ -178,6 +185,12 @@ public sealed class QrAuthService : IAuthService
         }
     }
 
+    /// <summary>
+    /// Время жизни QR-кода в секундах. Используется для обратного отсчёта на клиенте
+    /// до тех пор, пока сервер не сообщит актуальный ExpiresAt после сканирования.
+    /// </summary>
+    private const int QrLifetimeSeconds = 120;
+
     public Task StartQrAuthAsync(CancellationToken cancellationToken = default)
     {
         CancelQrAuth();
@@ -190,6 +203,7 @@ public sealed class QrAuthService : IAuthService
 
             var payload = BuildQrPayload();
             var svg = _qrRenderer.Render(payload);
+            var expiresAt = DateTime.UtcNow.AddSeconds(QrLifetimeSeconds);
 
             PersistRegistrationSettings();
 
@@ -197,8 +211,12 @@ public sealed class QrAuthService : IAuthService
                 "QR payload сформирован локально: {Modules}×{Modules} модулей (QR v{QrVersion}, payload v{PayloadVersion})",
                 svg.Modules, svg.Modules, svg.Version, QrPayload.CurrentVersion);
 
-            _qrData = new QrData(payload, svg.Markup, ExpiresAt: null, Status: null);
+            _qrData = new QrData(payload, svg.Markup, ExpiresAt: expiresAt, Status: null);
             SetStatus(AuthStatus.WaitingForScan);
+
+            // Запускаем таймер обратного отсчёта
+            _timerCts = CancellationTokenSource.CreateLinkedTokenSource(token);
+            _ = StartCountdownTimerAsync(_timerCts.Token);
 
             // Пункт 5: long-polling — соединение держится до сканирования кода.
             // Ответ сервера нужен только как подтверждение, содержимое QR не меняет.
@@ -214,64 +232,108 @@ public sealed class QrAuthService : IAuthService
         return Task.CompletedTask;
     }
 
+    private async Task StartCountdownTimerAsync(CancellationToken token)
+    {
+        while (!token.IsCancellationRequested)
+        {
+            try
+            {
+                StateChanged?.Invoke(this, EventArgs.Empty);
+                await Task.Delay(1000, token);
+            }
+            catch (TaskCanceledException)
+            {
+                break;
+            }
+        }
+    }
+
     private async Task WaitForConfirmationAsync(CancellationToken token)
     {
-        try
+        while (!token.IsCancellationRequested)
         {
-            SetStatus(AuthStatus.RequestingQr);
-
-            var crypto = _crypto ??= _cryptoFactory();
-            var request = CreateQrAuthRequest();
-            var bodyBytes = JsonSerializer.SerializeToUtf8Bytes(request, JsonOptions.Default);
-
-            var digest = crypto.ComputeDigest(bodyBytes);
-            var created = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
-            var nonce = crypto.NewNonce();
-
-            // keyId подписи совпадает с registration_id из тела запроса.
-            var signature = crypto.BuildSignatureHeader(
-                crypto.RegistrationId,
-                "post " + AuthApiService.QrRequestPath,
-                created,
-                nonce,
-                digest);
-
-            var response = await _api.RequestQrAsync(
-                AuthApiService.QrRequestPath,
-                bodyBytes,
-                new SignedRequestHeaders(signature, nonce, digest));
-
-            token.ThrowIfCancellationRequested();
-
-            _logger.LogInformation(
-                "Сервер подтвердил QR-запрос: requestId={RequestId} status={Status}",
-                response.QrRequestId,
-                response.Status);
-
-            PersistSessionKeys(response);
-
-            if (_qrData is { } current)
+            try
             {
-                _qrData = current with
-                {
-                    ExpiresAt = response.ExpiresAt,
-                    Status = response.Status
-                };
-            }
+                SetStatus(AuthStatus.RequestingQr);
 
-            SetStatus(AuthStatus.Authorized);
-        }
-        catch (OperationCanceledException)
-        {
-            _logger.LogInformation("Ожидание сканирования отменено");
-            _qrData = null;
-            SetStatus(AuthStatus.LoggedOut);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Ошибка при ожидании подтверждения QR-кода");
-            _error = ex;
-            SetStatus(AuthStatus.Error);
+                // Каждый цикл создаём свежие ключи и payload
+                _crypto = _cryptoFactory();
+                var request = CreateQrAuthRequest();
+                var bodyBytes = JsonSerializer.SerializeToUtf8Bytes(request, JsonOptions.Default);
+
+                var digest = _crypto.ComputeDigest(bodyBytes);
+                var created = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+                var nonce = _crypto.NewNonce();
+
+                var signature = _crypto.BuildSignatureHeader(
+                    _crypto.RegistrationId,
+                    "post " + AuthApiService.QrRequestPath,
+                    created,
+                    nonce,
+                    digest);
+
+                var response = await _api.RequestQrAsync(
+                    AuthApiService.QrRequestPath,
+                    bodyBytes,
+                    new SignedRequestHeaders(signature, nonce, digest));
+
+                token.ThrowIfCancellationRequested();
+
+                _logger.LogInformation(
+                    "Сервер подтвердил QR-запрос: requestId={RequestId} status={Status}",
+                    response.QrRequestId,
+                    response.Status);
+
+                PersistSessionKeys(response);
+
+                if (_qrData is { } current)
+                {
+                    _qrData = current with
+                    {
+                        ExpiresAt = response.ExpiresAt,
+                        Status = response.Status
+                    };
+                }
+
+                SetStatus(AuthStatus.Authorized);
+                break;
+            }
+            catch (OperationCanceledException)
+            {
+                _logger.LogInformation("Ожидание сканирования отменено");
+                _qrData = null;
+                SetStatus(AuthStatus.LoggedOut);
+                break;
+            }
+            catch (HttpRequestException ex) when (ex.StatusCode == System.Net.HttpStatusCode.RequestTimeout)
+            {
+                // 408 — запрос истёк, пересоздаём QR с новыми параметрами
+                _logger.LogWarning("Сервер вернул 408 — пересоздаём QR-код с новыми параметрами");
+
+                // Генерируем новый payload и показываем новый QR
+                var payload = BuildQrPayload();
+                var svg = _qrRenderer.Render(payload);
+                var expiresAt = DateTime.UtcNow.AddSeconds(QrLifetimeSeconds);
+                PersistRegistrationSettings();
+
+                _logger.LogInformation(
+                    "Пересоздан QR payload (повторная попытка): {Modules}×{Modules} модулей",
+                    svg.Modules, svg.Modules);
+
+                _qrData = new QrData(payload, svg.Markup, ExpiresAt: expiresAt, Status: null);
+                SetStatus(AuthStatus.WaitingForScan);
+
+                // Даем UI обновиться перед следующей попыткой
+                await Task.Delay(500, token);
+                continue;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Ошибка при ожидании подтверждения QR-кода");
+                _error = ex;
+                SetStatus(AuthStatus.Error);
+                break;
+            }
         }
     }
 
@@ -316,6 +378,10 @@ public sealed class QrAuthService : IAuthService
 
     public void CancelQrAuth()
     {
+        _timerCts?.Cancel();
+        _timerCts?.Dispose();
+        _timerCts = null;
+
         _waitCts?.Cancel();
         _waitCts?.Dispose();
         _waitCts = null;

@@ -125,6 +125,28 @@ public partial class MainPage : ContentPage
                 : "Срок действия: уточняется сервером";
         }
 
+        // Таймер обратного отсчёта
+        if (showQr && qrData is not null && qrData.ExpiresAt is { } expiresAt)
+        {
+            var remaining = qrData.RemainingSeconds;
+            if (remaining > 0)
+            {
+                var min = remaining / 60;
+                var sec = remaining % 60;
+                CountdownLabel.Text = $"Осталось: {min:00}:{sec:00}";
+                CountdownLabel.IsVisible = true;
+            }
+            else
+            {
+                CountdownLabel.Text = "QR-код истёк";
+                CountdownLabel.IsVisible = true;
+            }
+        }
+        else
+        {
+            CountdownLabel.IsVisible = false;
+        }
+
         if (_authService.Error is { } error)
         {
             StatusLabel.Text = $"Ошибка: {error.Message}";
