@@ -44,6 +44,15 @@
 	</ItemGroup>
 
 	<ItemGroup>
+		<!-- Тестовый проект лежит внутри дерева приложения, поэтому его исходники
+		     и сгенерированные obj-файлы нужно явно исключить: иначе MAUI-проект
+		     подхватывает их и получает дубли атрибутов сборки. -->
+		<Compile Remove="Tests\**" />
+		<None Remove="Tests\**" />
+		<MauiXaml Remove="Tests\**" />
+	</ItemGroup>
+
+	<ItemGroup>
 		<!-- App Icon -->
 		<MauiIcon Include="Resources\AppIcon\appicon.svg" ForegroundFile="Resources\AppIcon\appiconfg.svg" Color="#512BD4" />
 

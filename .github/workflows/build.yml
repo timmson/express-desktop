@@ -24,6 +24,10 @@ jobs:
       - name: Build
         run: dotnet build --no-restore
 
+      - name: Test
+        # Явный путь: в Solutions нет, а корневой restore/build покрывают только ExpressApp.csproj.
+        run: dotnet test Tests/Tests.csproj
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:

@@ -89,10 +89,23 @@ public sealed class FileSettingsStore : ISettingsStore
 
     public FileSettingsStore(ILogger<FileSettingsStore> logger) => _logger = logger;
 
-    public string FilePath { get; } = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
-        ".express",
-        "settings.json");
+    public string FilePath { get; } = ResolveFilePath();
+
+    private static string ResolveFilePath()
+    {
+        // Переменная EXPRESS_SETTINGS_PATH позволяет тестам изолированно
+        // писать в temp-директорию вместо ~/.express/settings.json.
+        var envPath = Environment.GetEnvironmentVariable("EXPRESS_SETTINGS_PATH");
+        if (!string.IsNullOrEmpty(envPath))
+        {
+            return envPath;
+        }
+
+        return Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+            ".express",
+            "settings.json");
+    }
 
     public AppSettings Load()
     {
